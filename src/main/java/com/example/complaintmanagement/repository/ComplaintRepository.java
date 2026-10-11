@@ -1,6 +1,8 @@
 package com.example.complaintmanagement.repository;
 
 import com.example.complaintmanagement.entity.Complaint;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -10,21 +12,14 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
-/**
- * ComplaintRepository — all database queries for Complaint.
- *
- * Key queries:
- *   - Find complaints by user (for user's complaint list)
- *   - Find by status (for filtering)
- *   - Find by complaint number (for lookup)
- *   - Count by status (for dashboard stats)
- *   - Date-range filtering (for reports)
- */
 @Repository
 public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
 
-    // Find all complaints by a specific user — used in "My Complaints"
+    // Find all complaints by a specific user
     List<Complaint> findByUserIdOrderByCreatedAtDesc(Long userId);
+
+    // Find paged complaints by user
+    Page<Complaint> findByUserId(Long userId, Pageable pageable);
 
     // Find complaint by its unique complaint number (e.g., CMP-2026-00001)
     Optional<Complaint> findByComplaintNumber(String complaintNumber);
@@ -38,7 +33,15 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
     // Count complaints for a specific user
     long countByUserId(Long userId);
 
-    // Find complaints filtered by status (admin)
+    // Count complaints assigned to staff
+    long countByAssignedStaffId(Long staffId);
+    long countByAssignedStaffIdAndStatus(Long staffId, Complaint.Status status);
+
+    // Find complaints assigned to staff
+    List<Complaint> findByAssignedStaffIdOrderByCreatedAtDesc(Long staffId);
+    Page<Complaint> findByAssignedStaffId(Long staffId, Pageable pageable);
+
+    // Find complaints filtered by status
     List<Complaint> findByStatusOrderByCreatedAtDesc(Complaint.Status status);
 
     // Find complaints by department
@@ -51,7 +54,7 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
     @Query("SELECT c.complaintNumber FROM Complaint c ORDER BY c.id DESC")
     List<String> findLatestComplaintNumbers();
 
-    // Admin: search complaints by keyword in title
+    // Admin: search complaints by keyword in title or number
     @Query("SELECT c FROM Complaint c WHERE " +
            "LOWER(c.title) LIKE LOWER(CONCAT('%', :keyword, '%')) OR " +
            "LOWER(c.complaintNumber) LIKE LOWER(CONCAT('%', :keyword, '%'))")
@@ -83,7 +86,7 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
            nativeQuery = true)
     List<Object[]> countMonthlyComplaints(@Param("startDate") LocalDateTime startDate);
 
-    // Find all complaints with multiple filters (admin complaint management)
+    // Find all complaints with multiple filters (non-paged)
     @Query("SELECT c FROM Complaint c WHERE " +
            "(:status IS NULL OR c.status = :status) AND " +
            "(:category IS NULL OR c.category = :category) AND " +
@@ -94,4 +97,21 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
                                     @Param("category") Complaint.Category category,
                                     @Param("priority") Complaint.Priority priority,
                                     @Param("departmentId") Long departmentId);
+
+    // Find all complaints with multiple filters (paged)
+    @Query("SELECT c FROM Complaint c WHERE " +
+           "(:status IS NULL OR c.status = :status) AND " +
+           "(:category IS NULL OR c.category = :category) AND " +
+           "(:priority IS NULL OR c.priority = :priority) AND " +
+           "(:departmentId IS NULL OR c.department.id = :departmentId)")
+    Page<Complaint> findWithFiltersPaged(@Param("status") Complaint.Status status,
+                                         @Param("category") Complaint.Category category,
+                                         @Param("priority") Complaint.Priority priority,
+                                         @Param("departmentId") Long departmentId,
+                                         Pageable pageable);
+
+    // SLA engine: find non-resolved, non-rejected complaints past SLA deadline that are not yet marked overdue
+    @Query("SELECT c FROM Complaint c WHERE c.status NOT IN ('RESOLVED', 'REJECTED') " +
+           "AND c.slaDeadline IS NOT NULL AND c.slaDeadline < :now AND c.isOverdue = false")
+    List<Complaint> findPendingBreachedSlaComplaints(@Param("now") LocalDateTime now);
 }

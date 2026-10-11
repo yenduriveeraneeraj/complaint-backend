@@ -6,6 +6,8 @@ import com.example.complaintmanagement.exception.*;
 import com.example.complaintmanagement.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -18,17 +20,6 @@ import java.time.Year;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * ComplaintService — all business logic for complaints.
- *
- * Handles:
- *   - Submit new complaint (with file upload)
- *   - List complaints (user's own or all for admin)
- *   - Get complaint details
- *   - Assign to department + staff
- *   - Update status + add history entry
- *   - Generate unique complaint numbers
- */
 @Service
 @RequiredArgsConstructor
 public class ComplaintService {
@@ -40,15 +31,14 @@ public class ComplaintService {
     private final ComplaintStatusHistoryRepository historyRepository;
     private final NotificationService notificationService;
     private final EmailService emailService;
+    private final WebSocketNotificationService webSocketNotificationService;
 
     @Value("${app.upload.dir}")
     private String uploadDir;
 
-    /** Expose repository for admin chart queries */
     public ComplaintRepository getComplaintRepository() {
         return complaintRepository;
     }
-
 
     // ── SUBMIT COMPLAINT ──────────────────────────────────────
 
@@ -73,27 +63,6 @@ public class ComplaintService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User", userId));
 
-        Department department = null;
-        if (departmentId != null) {
-            department = departmentRepository.findById(departmentId).orElse(null);
-        }
-
-        // Generate unique complaint number: CMP-2026-00001
-        String complaintNumber = generateComplaintNumber();
-
-        // Handle file attachment
-        String attachmentPath = null;
-        String attachmentName = null;
-
-        if (attachment != null && !attachment.isEmpty()) {
-            try {
-                attachmentPath = saveFile(attachment, complaintNumber);
-                attachmentName = StringUtils.cleanPath(attachment.getOriginalFilename());
-            } catch (IOException e) {
-                throw new BadRequestException("Failed to save attachment. Please try again.");
-            }
-        }
-
         Complaint.Category catEnum;
         try {
             catEnum = Complaint.Category.valueOf(category.toUpperCase().trim().replace(" ", "_").replace("/", "_"));
@@ -108,7 +77,32 @@ public class ComplaintService {
             prioEnum = Complaint.Priority.MEDIUM;
         }
 
-        // Build the complaint entity
+        Department department = null;
+        if (departmentId != null) {
+            department = departmentRepository.findById(departmentId).orElse(null);
+        }
+
+        // Auto-routing if department unassigned
+        if (department == null) {
+            department = autoAssignDepartment(catEnum);
+        }
+
+        String complaintNumber = generateComplaintNumber();
+
+        String attachmentPath = null;
+        String attachmentName = null;
+
+        if (attachment != null && !attachment.isEmpty()) {
+            try {
+                attachmentPath = saveFile(attachment, complaintNumber);
+                attachmentName = StringUtils.cleanPath(attachment.getOriginalFilename());
+            } catch (IOException e) {
+                throw new BadRequestException("Failed to save attachment. Please try again.");
+            }
+        }
+
+        LocalDateTime slaDeadline = calculateSlaDeadline(prioEnum);
+
         Complaint complaint = Complaint.builder()
                 .complaintNumber(complaintNumber)
                 .title(title)
@@ -120,16 +114,19 @@ public class ComplaintService {
                 .department(department)
                 .attachmentPath(attachmentPath)
                 .attachmentName(attachmentName)
+                .slaDeadline(slaDeadline)
+                .isOverdue(false)
                 .user(user)
                 .build();
 
         complaint = complaintRepository.save(complaint);
 
-        // Add initial status history entry
-        saveHistoryEntry(complaint, Complaint.Status.PENDING,
-                "Complaint submitted successfully.", "System");
+        String initialHistoryMsg = "Complaint submitted successfully.";
+        if (department != null) {
+            initialHistoryMsg += " Auto-routed to " + department.getName() + ".";
+        }
+        saveHistoryEntry(complaint, Complaint.Status.PENDING, initialHistoryMsg, "System");
 
-        // Send notification to user
         notificationService.createNotification(
                 user,
                 complaint,
@@ -137,10 +134,73 @@ public class ComplaintService {
                 "We will review it shortly."
         );
 
+        webSocketNotificationService.notifyComplaintUpdate(complaintNumber, "CREATED");
+
         return mapToResponse(complaint);
     }
 
-    // ── GET USER'S COMPLAINTS ─────────────────────────────────
+    // ── AUTO ASSIGNMENT RULE ─────────────────────────────────
+
+    private Department autoAssignDepartment(Complaint.Category category) {
+        if (category == null) return null;
+        List<Department> depts = departmentRepository.findAll();
+        if (depts.isEmpty()) return null;
+
+        String deptKeyword = switch (category) {
+            case ELECTRICAL -> "electric";
+            case WATER -> "water";
+            case INTERNET_WIFI -> "it";
+            case CLEANLINESS -> "sanitation";
+            case MAINTENANCE, TRANSPORT, SECURITY -> "road";
+            default -> null;
+        };
+
+        if (deptKeyword == null) return depts.get(0);
+
+        return depts.stream()
+                .filter(d -> d.getName().toLowerCase().contains(deptKeyword))
+                .findFirst()
+                .orElse(depts.get(0));
+    }
+
+    // ── SLA DEADLINE CALCULATION ──────────────────────────────
+
+    private LocalDateTime calculateSlaDeadline(Complaint.Priority priority) {
+        LocalDateTime now = LocalDateTime.now();
+        if (priority == null) return now.plusHours(72);
+        return switch (priority) {
+            case URGENT -> now.plusHours(24);
+            case HIGH -> now.plusHours(48);
+            case MEDIUM -> now.plusHours(72);
+            case LOW -> now.plusDays(7);
+        };
+    }
+
+    // ── PUBLIC COMPLAINT TRACKING ────────────────────────────
+
+    public PublicComplaintTrackResponse getPublicComplaintTrack(String complaintNumber) {
+        Complaint complaint = complaintRepository.findByComplaintNumber(complaintNumber)
+                .orElseThrow(() -> new ResourceNotFoundException("Complaint", "number", complaintNumber));
+
+        List<StatusHistoryResponse> timeline = getStatusHistory(complaint.getId());
+
+        return PublicComplaintTrackResponse.builder()
+                .complaintNumber(complaint.getComplaintNumber())
+                .title(complaint.getTitle())
+                .category(complaint.getCategory())
+                .priority(complaint.getPriority())
+                .status(complaint.getStatus())
+                .departmentName(complaint.getDepartment() != null ? complaint.getDepartment().getName() : "Unassigned")
+                .createdAt(complaint.getCreatedAt())
+                .updatedAt(complaint.getUpdatedAt())
+                .resolvedAt(complaint.getResolvedAt())
+                .slaDeadline(complaint.getSlaDeadline())
+                .isOverdue(complaint.getIsOverdue())
+                .timeline(timeline)
+                .build();
+    }
+
+    // ── COMPLAINT LISTINGS (Paged & Non-Paged) ───────────────
 
     public List<ComplaintResponse> getUserComplaints(Long userId) {
         return complaintRepository.findByUserIdOrderByCreatedAtDesc(userId)
@@ -149,7 +209,10 @@ public class ComplaintService {
                 .collect(Collectors.toList());
     }
 
-    // ── GET ALL COMPLAINTS (Admin) ────────────────────────────
+    public Page<ComplaintResponse> getUserComplaintsPaged(Long userId, Pageable pageable) {
+        return complaintRepository.findByUserId(userId, pageable)
+                .map(this::mapToResponse);
+    }
 
     public List<ComplaintResponse> getAllComplaints(
             String status, String category, String priority, Long departmentId) {
@@ -162,6 +225,32 @@ public class ComplaintService {
                 ? Complaint.Priority.valueOf(priority) : null;
 
         return complaintRepository.findWithFilters(statusEnum, categoryEnum, priorityEnum, departmentId)
+                .stream()
+                .map(this::mapToResponse)
+                .collect(Collectors.toList());
+    }
+
+    public Page<ComplaintResponse> getAllComplaintsPaged(
+            String status, String category, String priority, Long departmentId, Pageable pageable) {
+
+        Complaint.Status statusEnum = (status != null && !status.isBlank())
+                ? Complaint.Status.valueOf(status) : null;
+        Complaint.Category categoryEnum = (category != null && !category.isBlank())
+                ? Complaint.Category.valueOf(category) : null;
+        Complaint.Priority priorityEnum = (priority != null && !priority.isBlank())
+                ? Complaint.Priority.valueOf(priority) : null;
+
+        return complaintRepository.findWithFiltersPaged(statusEnum, categoryEnum, priorityEnum, departmentId, pageable)
+                .map(this::mapToResponse);
+    }
+
+    public Page<ComplaintResponse> getStaffComplaintsPaged(Long staffId, Pageable pageable) {
+        return complaintRepository.findByAssignedStaffId(staffId, pageable)
+                .map(this::mapToResponse);
+    }
+
+    public List<ComplaintResponse> getStaffComplaints(Long staffId) {
+        return complaintRepository.findByAssignedStaffIdOrderByCreatedAtDesc(staffId)
                 .stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
@@ -219,7 +308,6 @@ public class ComplaintService {
 
         saveHistoryEntry(complaint, complaint.getStatus(), historyMsg, adminName);
 
-        // Notify the user
         notificationService.createNotification(
                 complaint.getUser(),
                 complaint,
@@ -227,14 +315,16 @@ public class ComplaintService {
                 " has been assigned to " + department.getName() + "."
         );
 
+        webSocketNotificationService.notifyComplaintUpdate(complaint.getComplaintNumber(), "ASSIGNED");
+
         return mapToResponse(complaint);
     }
 
-    // ── UPDATE STATUS (Admin) ─────────────────────────────────
+    // ── UPDATE STATUS (Admin / Staff) ─────────────────────────
 
     @Transactional
     public ComplaintResponse updateStatus(Long complaintId, UpdateStatusRequest req,
-                                          String adminName) {
+                                           String actorName) {
         Complaint complaint = complaintRepository.findById(complaintId)
                 .orElseThrow(() -> new ResourceNotFoundException("Complaint", complaintId));
 
@@ -245,7 +335,6 @@ public class ComplaintService {
             complaint.setRemarks(req.getRemarks());
         }
 
-        // Mark resolved date
         if (req.getStatus() == Complaint.Status.RESOLVED ||
             req.getStatus() == Complaint.Status.REJECTED) {
             complaint.setResolvedAt(LocalDateTime.now());
@@ -261,9 +350,8 @@ public class ComplaintService {
 
         String historyMsg = req.getRemarks() != null ? req.getRemarks()
                 : "Status updated from " + oldStatus + " to " + req.getStatus() + ".";
-        saveHistoryEntry(complaint, req.getStatus(), historyMsg, adminName);
+        saveHistoryEntry(complaint, req.getStatus(), historyMsg, actorName);
 
-        // Notify user of status change (in-app notification)
         notificationService.createNotification(
                 complaint.getUser(),
                 complaint,
@@ -271,7 +359,6 @@ public class ComplaintService {
                 " status has been updated to: " + req.getStatus().name().replace("_", " ")
         );
 
-        // Send automated Gmail notification to citizen
         if (req.getStatus() == Complaint.Status.RESOLVED) {
             emailService.sendComplaintResolvedEmail(complaint.getUser(), complaint, req.getRemarks());
         } else {
@@ -282,6 +369,8 @@ public class ComplaintService {
                 req.getRemarks()
             );
         }
+
+        webSocketNotificationService.notifyComplaintUpdate(complaint.getComplaintNumber(), "STATUS_UPDATED");
 
         return mapToResponse(complaint);
     }
@@ -308,12 +397,17 @@ public class ComplaintService {
                 .build();
     }
 
+    public DashboardStats getStaffDashboardStats(Long staffId) {
+        return DashboardStats.builder()
+                .myTotalComplaints(complaintRepository.countByAssignedStaffId(staffId))
+                .myPendingComplaints(complaintRepository.countByAssignedStaffIdAndStatus(staffId, Complaint.Status.PENDING))
+                .myInProgressComplaints(complaintRepository.countByAssignedStaffIdAndStatus(staffId, Complaint.Status.IN_PROGRESS))
+                .myResolvedComplaints(complaintRepository.countByAssignedStaffIdAndStatus(staffId, Complaint.Status.RESOLVED))
+                .build();
+    }
+
     // ── PRIVATE HELPERS ───────────────────────────────────────
 
-    /**
-     * Generate unique complaint number: CMP-2026-00001
-     * Auto-increments based on the last complaint number in DB.
-     */
     private String generateComplaintNumber() {
         int year = Year.now().getValue();
         List<String> existing = complaintRepository.findLatestComplaintNumbers();
@@ -322,7 +416,6 @@ public class ComplaintService {
         if (!existing.isEmpty()) {
             String last = existing.get(0);
             try {
-                // Extract the sequence number from "CMP-2026-00042"
                 String seqPart = last.substring(last.lastIndexOf('-') + 1);
                 nextSeq = Integer.parseInt(seqPart) + 1;
             } catch (Exception ignored) {}
@@ -331,11 +424,7 @@ public class ComplaintService {
         return String.format("CMP-%d-%05d", year, nextSeq);
     }
 
-    /**
-     * Save file to uploads directory.
-     */
     private String saveFile(MultipartFile file, String complaintNumber) throws IOException {
-        // Validate file type
         String originalName = StringUtils.cleanPath(file.getOriginalFilename());
         String extension = originalName.substring(originalName.lastIndexOf('.') + 1).toLowerCase();
         List<String> allowed = List.of("jpg", "jpeg", "png", "pdf");
@@ -344,11 +433,9 @@ public class ComplaintService {
             throw new BadRequestException("Only JPG, JPEG, PNG, and PDF files are allowed.");
         }
 
-        // Create upload directory
         Path uploadPath = Paths.get(uploadDir).toAbsolutePath().normalize();
         Files.createDirectories(uploadPath);
 
-        // Unique filename: CMP-2026-00001_originalname.jpg
         String fileName = complaintNumber + "_" + originalName;
         Path filePath = uploadPath.resolve(fileName);
         Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
@@ -356,9 +443,6 @@ public class ComplaintService {
         return fileName;
     }
 
-    /**
-     * Record a status history entry.
-     */
     private void saveHistoryEntry(Complaint complaint, Complaint.Status status,
                                    String message, String changedBy) {
         ComplaintStatusHistory history = ComplaintStatusHistory.builder()
@@ -370,9 +454,6 @@ public class ComplaintService {
         historyRepository.save(history);
     }
 
-    /**
-     * Convert Complaint entity → ComplaintResponse DTO.
-     */
     public ComplaintResponse mapToResponse(Complaint c) {
         ComplaintResponse resp = new ComplaintResponse();
         resp.setId(c.getId());
@@ -386,6 +467,8 @@ public class ComplaintService {
         resp.setRemarks(c.getRemarks());
         resp.setAttachmentName(c.getAttachmentName());
         resp.setAttachmentPath(c.getAttachmentPath());
+        resp.setSlaDeadline(c.getSlaDeadline());
+        resp.setIsOverdue(c.getIsOverdue() != null ? c.getIsOverdue() : false);
         resp.setCreatedAt(c.getCreatedAt());
         resp.setUpdatedAt(c.getUpdatedAt());
         resp.setResolvedAt(c.getResolvedAt());

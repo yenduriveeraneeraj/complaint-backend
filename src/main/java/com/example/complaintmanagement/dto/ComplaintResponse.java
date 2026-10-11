@@ -5,13 +5,6 @@ import lombok.*;
 
 import java.time.LocalDateTime;
 
-/**
- * ComplaintResponse DTO — sent to frontend when listing/viewing complaints.
- *
- * This is what the user/admin sees in the complaint list and detail views.
- * We include department name and staff name as strings (not full objects)
- * to keep the response clean and avoid circular references.
- */
 @Getter
 @Setter
 @NoArgsConstructor
@@ -43,6 +36,10 @@ public class ComplaintResponse {
     // Staff info (null if not yet assigned)
     private Long staffId;
     private String staffName;
+
+    // SLA tracking
+    private LocalDateTime slaDeadline;
+    private Boolean isOverdue;
 
     // Timestamps
     private LocalDateTime createdAt;

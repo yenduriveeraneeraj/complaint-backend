@@ -78,6 +78,27 @@ public class EmailService {
         sendEmail(citizen.getEmail(), subject, body);
     }
 
+    /**
+     * Send 6-digit OTP email for password reset.
+     */
+    @Async
+    public void sendPasswordResetEmail(User user, String otp) {
+        if (user == null || user.getEmail() == null || user.getEmail().isBlank()) {
+            return;
+        }
+
+        String subject = "🔑 Password Reset Request — ResolverCMS";
+        String body = "Dear " + user.getFullName() + ",\n\n"
+                + "We received a request to reset your ResolverCMS account password.\n\n"
+                + "Your 6-digit verification OTP code is:\n\n"
+                + "      " + otp + "\n\n"
+                + "This code is valid for 15 minutes. If you did not request a password reset, please ignore this email.\n\n"
+                + "Best regards,\n"
+                + "ResolverCMS Security Team";
+
+        sendEmail(user.getEmail(), subject, body);
+    }
+
     private void sendEmail(String toEmail, String subject, String text) {
         log.info("📧 Sending Gmail notification to: {} | Subject: {}", toEmail, subject);
         try {

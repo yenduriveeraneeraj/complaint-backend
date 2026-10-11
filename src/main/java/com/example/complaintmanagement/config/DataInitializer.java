@@ -21,11 +21,18 @@ public class DataInitializer implements CommandLineRunner {
     private final StaffRepository staffRepository;
     private final ComplaintRepository complaintRepository;
     private final PasswordEncoder passwordEncoder;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     @Override
     @Transactional
     public void run(String... args) throws Exception {
         log.info("Checking data initialization...");
+
+        try {
+            jdbcTemplate.execute("ALTER TABLE users MODIFY COLUMN role VARCHAR(50)");
+        } catch (Exception e) {
+            log.debug("Role column alteration skipped or not needed: {}", e.getMessage());
+        }
 
         // 1. Seed Admin User
         User admin = userRepository.findByEmail("admin@cms.com").orElseGet(() -> {
@@ -57,43 +64,56 @@ public class DataInitializer implements CommandLineRunner {
             return userRepository.save(newUser);
         });
 
-        // 3. Seed Departments if empty
+        // 3. Seed Staff User
+        User staffUser = userRepository.findByEmail("staff@cms.com").orElseGet(() -> {
+            User newUser = User.builder()
+                    .fullName("Alex Rivera (Technician)")
+                    .email("staff@cms.com")
+                    .password(passwordEncoder.encode("Staff@123"))
+                    .phone("9888111222")
+                    .role(User.Role.ROLE_STAFF)
+                    .isActive(true)
+                    .createdAt(LocalDateTime.now())
+                    .build();
+            log.info("Seeding default Staff user (staff@cms.com)");
+            return userRepository.save(newUser);
+        });
+
+        // 4. Seed Departments if empty
         if (departmentRepository.count() == 0) {
             log.info("Seeding departments...");
             Department dept1 = departmentRepository.save(Department.builder()
                     .name("IT & Technical Support")
                     .description("Handles computer hardware, software, server and connectivity issues")
                     .isActive(true)
-                    .createdAt(LocalDateTime.now())
                     .build());
 
             Department dept2 = departmentRepository.save(Department.builder()
                     .name("Water & Sanitation")
                     .description("Handles water supply, pipe leaks, sewage and drainage problems")
                     .isActive(true)
-                    .createdAt(LocalDateTime.now())
                     .build());
 
             Department dept3 = departmentRepository.save(Department.builder()
                     .name("Electricity & Power")
                     .description("Handles power outages, faulty lines, street lights and transformers")
                     .isActive(true)
-                    .createdAt(LocalDateTime.now())
                     .build());
 
             Department dept4 = departmentRepository.save(Department.builder()
                     .name("Roads & Infrastructure")
                     .description("Handles potholes, road damage, traffic lights and footpaths")
                     .isActive(true)
-                    .createdAt(LocalDateTime.now())
                     .build());
 
             // Seed Staff
             Staff staff1 = staffRepository.save(Staff.builder()
                     .name("Alex Rivera")
-                    .email("alex.it@cms.com")
+                    .email("staff@cms.com")
                     .phone("9888111222")
+                    .designation("Senior Network Engineer")
                     .department(dept1)
+                    .user(staffUser)
                     .isActive(true)
                     .createdAt(LocalDateTime.now())
                     .build());
@@ -102,6 +122,7 @@ public class DataInitializer implements CommandLineRunner {
                     .name("Sarah Connor")
                     .email("sarah.water@cms.com")
                     .phone("9888333444")
+                    .designation("Hydraulic Inspector")
                     .department(dept2)
                     .isActive(true)
                     .createdAt(LocalDateTime.now())
@@ -111,6 +132,7 @@ public class DataInitializer implements CommandLineRunner {
                     .name("Michael Vance")
                     .email("michael.power@cms.com")
                     .phone("9888555666")
+                    .designation("Electrical Supervisor")
                     .department(dept3)
                     .isActive(true)
                     .createdAt(LocalDateTime.now())
@@ -129,6 +151,8 @@ public class DataInitializer implements CommandLineRunner {
                         .assignedStaff(staff1)
                         .user(regularUser)
                         .location("Sector 4, Block C")
+                        .slaDeadline(LocalDateTime.now().plusHours(48))
+                        .isOverdue(false)
                         .createdAt(LocalDateTime.now().minusDays(2))
                         .updatedAt(LocalDateTime.now().minusDays(1))
                         .build());
@@ -143,7 +167,9 @@ public class DataInitializer implements CommandLineRunner {
                         .department(dept2)
                         .user(regularUser)
                         .location("Main Market Gate 2")
-                        .createdAt(LocalDateTime.now().minusHours(5))
+                        .slaDeadline(LocalDateTime.now().minusHours(1))
+                        .isOverdue(true)
+                        .createdAt(LocalDateTime.now().minusHours(25))
                         .updatedAt(LocalDateTime.now().minusHours(5))
                         .build());
 
@@ -158,10 +184,20 @@ public class DataInitializer implements CommandLineRunner {
                         .assignedStaff(staff3)
                         .user(regularUser)
                         .location("5th Avenue, Crossroad 12")
+                        .slaDeadline(LocalDateTime.now().plusHours(72))
+                        .isOverdue(false)
                         .createdAt(LocalDateTime.now().minusDays(5))
                         .updatedAt(LocalDateTime.now().minusDays(1))
                         .build());
             }
+        } else {
+            // Ensure staffUser is linked if staff exists
+            staffRepository.findByEmail("staff@cms.com").ifPresent(s -> {
+                if (s.getUser() == null) {
+                    s.setUser(staffUser);
+                    staffRepository.save(s);
+                }
+            });
         }
 
         log.info("Data initialization complete!");

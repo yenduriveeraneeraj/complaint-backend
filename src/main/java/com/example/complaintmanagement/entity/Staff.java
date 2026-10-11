@@ -65,6 +65,12 @@ public class Staff {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
+    // Optional link to User account for ROLE_STAFF portal login
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id")
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties({"password", "complaints", "notifications", "feedbacks"})
+    private User user;
+
     // ── RELATIONSHIPS ──────────────────────────────────────
     // Each staff member belongs to ONE department
     @ManyToOne(fetch = FetchType.LAZY)

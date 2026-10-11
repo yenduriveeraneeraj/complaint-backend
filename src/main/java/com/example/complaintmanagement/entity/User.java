@@ -49,7 +49,7 @@ public class User {
 
     // Phone Number — Indian phone format validation
     @NotBlank(message = "Phone number is required")
-    @Pattern(regexp = "^[6-9]\\d{9}$", message = "Please provide a valid 10-digit phone number")
+    @Pattern(regexp = "^\\d{10}$", message = "Please provide a valid 10-digit phone number")
     @Column(name = "phone", nullable = false, length = 15)
     private String phone;
 
@@ -98,6 +98,7 @@ public class User {
     // ── ENUM: User Roles ───────────────────────────────────
     public enum Role {
         ROLE_USER,   // Regular user — can submit complaints
-        ROLE_ADMIN   // Admin — can manage everything
+        ROLE_ADMIN,  // Admin — can manage everything
+        ROLE_STAFF   // Staff/Technician — handles assigned complaints
     }
 }

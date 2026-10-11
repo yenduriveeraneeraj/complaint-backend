@@ -94,6 +94,15 @@ public class Complaint {
     @Column(name = "resolved_at")
     private LocalDateTime resolvedAt;
 
+    // SLA deadline calculated based on priority on creation
+    @Column(name = "sla_deadline")
+    private LocalDateTime slaDeadline;
+
+    // SLA Overdue flag
+    @Column(name = "is_overdue", nullable = false)
+    @Builder.Default
+    private Boolean isOverdue = false;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

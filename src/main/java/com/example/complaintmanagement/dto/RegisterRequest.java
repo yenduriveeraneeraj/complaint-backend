@@ -25,7 +25,7 @@ public class RegisterRequest {
     private String email;
 
     @NotBlank(message = "Phone number is required")
-    @Pattern(regexp = "^[6-9]\\d{9}$", message = "Please provide a valid 10-digit phone number")
+    @Pattern(regexp = "^\\d{10}$", message = "Please provide a valid 10-digit phone number")
     private String phone;
 
     @NotBlank(message = "Password is required")
