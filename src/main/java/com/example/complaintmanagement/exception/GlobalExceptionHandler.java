@@ -16,6 +16,8 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
+import lombok.extern.slf4j.Slf4j;
+
 /**
  * GlobalExceptionHandler — catches ALL exceptions in the app
  * and returns proper JSON error responses to the React frontend.
@@ -31,6 +33,7 @@ import java.util.Map;
  * }
  */
 @RestControllerAdvice
+@Slf4j
 public class GlobalExceptionHandler {
 
     // ── Resource Not Found (404) ─────────────────────────────
@@ -110,6 +113,7 @@ public class GlobalExceptionHandler {
     // ── Catch-all for unexpected errors (500) ─────────────────
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGenericException(Exception ex) {
+        log.error("Unhandled exception: ", ex);
         ErrorResponse error = new ErrorResponse(
             HttpStatus.INTERNAL_SERVER_ERROR.value(),
             "An unexpected error occurred. Please try again later.",
